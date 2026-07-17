@@ -4,7 +4,10 @@ import { pool } from '@/lib/db'
 if (!process.env.BETTER_AUTH_SECRET) throw new Error('BETTER_AUTH_SECRET 未配置')
 
 export const auth = betterAuth({
-  database: pool,
+  database: {
+    db: pool,
+    type: 'mysql',
+  },
   secret: process.env.BETTER_AUTH_SECRET,
   baseURL: process.env.BETTER_AUTH_URL ?? (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : process.env.V0_RUNTIME_URL),
   emailAndPassword: { enabled: true, autoSignIn: true },
