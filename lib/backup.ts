@@ -1,18 +1,34 @@
 import { createHash } from 'node:crypto'
 import { and, desc, eq } from 'drizzle-orm'
 import { db } from '@/lib/db'
-import { accountLedger, backupSnapshots, businessSettings, buyoutRecords, contractSnapshots, customerPortals, lossRecords, paymentAllocations, paymentRecords, receivableBills, renewalRecords, rentalEvents, rentalItems, rentals, returnRecords } from '@/lib/db/schema'
+import { account, accountLedger, backupSnapshots, businessSettings, buyoutRecords, contractSnapshots, customerPortals, lossRecords, paymentAllocations, paymentRecords, receivableBills, renewalRecords, rentalEvents, rentalItems, rentals, returnRecords, user } from '@/lib/db/schema'
 
-export const BACKUP_VERSION = 1
+export const BACKUP_VERSION = 2
 export const backupTables = { rentals, rentalItems, buyoutRecords, renewalRecords, paymentRecords, receivableBills, paymentAllocations, accountLedger, rentalEvents, returnRecords, lossRecords, businessSettings, contractSnapshots, customerPortals } as const
-export type BackupPayload = { format: 'suwei-rental-backup'; schemaVersion: number; createdAt: string; userId: string; tables: Record<string, unknown[]> }
+export type BackupPayload = {
+  format: 'suwei-rental-backup'
+  schemaVersion: number
+  createdAt: string
+  userId: string
+  tables: Record<string, unknown[]>
+  authentication: {
+    users: Array<{ id: string; name: string; email: string; emailVerified: boolean; image: string | null; createdAt: Date; updatedAt: Date }>
+    accounts: Array<{ id: string; accountId: string; providerId: string; userId: string; password: string | null; createdAt: Date; updatedAt: Date }>
+  }
+}
 
 export async function buildBackup(userId: string): Promise<BackupPayload> {
-  const entries = await Promise.all(Object.entries(backupTables).map(async ([name, table]) => [name, await db.select().from(table).where(eq(table.userId, userId))] as const))
-  return { format: 'suwei-rental-backup', schemaVersion: BACKUP_VERSION, createdAt: new Date().toISOString(), userId, tables: Object.fromEntries(entries) }
+  const [entries, users, accounts] = await Promise.all([
+    Promise.all(Object.entries(backupTables).map(async ([name, table]) => [name, await db.select().from(table).where(eq(table.userId, userId))] as const)),
+    db.select().from(user).where(eq(user.id, userId)),
+    db.select({ id: account.id, accountId: account.accountId, providerId: account.providerId, userId: account.userId, password: account.password, createdAt: account.createdAt, updatedAt: account.updatedAt }).from(account).where(eq(account.userId, userId)),
+  ])
+  return { format: 'suwei-rental-backup', schemaVersion: BACKUP_VERSION, createdAt: new Date().toISOString(), userId, tables: Object.fromEntries(entries), authentication: { users, accounts } }
 }
 export function backupChecksum(payload: BackupPayload) { return createHash('sha256').update(JSON.stringify(payload)).digest('hex') }
-export function countBackupRecords(payload: BackupPayload) { return Object.values(payload.tables).reduce((sum, rows) => sum + rows.length, 0) }
+export function countBackupRecords(payload: BackupPayload) {
+  return Object.values(payload.tables).reduce((sum, rows) => sum + rows.length, 0) + payload.authentication.users.length + payload.authentication.accounts.length
+}
 export function validateBackup(value: unknown, userId: string) {
   if (!value || typeof value !== 'object') throw new Error('备份文件格式无效')
   const payload = value as BackupPayload
@@ -20,6 +36,8 @@ export function validateBackup(value: unknown, userId: string) {
   if (payload.schemaVersion !== BACKUP_VERSION) throw new Error(`备份版本 ${payload.schemaVersion} 与当前版本 ${BACKUP_VERSION} 不兼容`)
   if (payload.userId !== userId) throw new Error('备份所属账号与当前门店不匹配')
   for (const name of Object.keys(backupTables)) if (!Array.isArray(payload.tables?.[name])) throw new Error(`备份缺少数据表：${name}`)
+  if (!Array.isArray(payload.authentication?.users) || !Array.isArray(payload.authentication?.accounts)) throw new Error('备份缺少账户认证数据')
+  if (payload.authentication.users.some((row) => row.id !== userId) || payload.authentication.accounts.some((row) => row.userId !== userId)) throw new Error('备份包含其他账号的数据')
   return payload
 }
 export async function saveCloudSnapshot(userId: string, backupType = 'scheduled') {
@@ -51,6 +69,14 @@ export async function restoreBackup(userId: string, rawPayload: unknown) {
     for (const [name, table] of Object.entries(backupTables)) {
       const rows = payload.tables[name]
       if (rows.length) await tx.insert(table).values(rows.map(hydrateBackupRow) as never)
+    }
+    for (const row of payload.authentication.users) {
+      const hydrated = hydrateBackupRow(row) as typeof user.$inferInsert
+      await tx.insert(user).values(hydrated).onConflictDoUpdate({ target: user.id, set: { name: hydrated.name, email: hydrated.email, emailVerified: hydrated.emailVerified, image: hydrated.image, updatedAt: hydrated.updatedAt } })
+    }
+    for (const row of payload.authentication.accounts) {
+      const hydrated = hydrateBackupRow(row) as typeof account.$inferInsert
+      await tx.insert(account).values(hydrated).onConflictDoUpdate({ target: account.id, set: { accountId: hydrated.accountId, providerId: hydrated.providerId, userId: hydrated.userId, password: hydrated.password, updatedAt: hydrated.updatedAt } })
     }
   })
   return { recordCount: countBackupRecords(payload), checksum: backupChecksum(payload) }
