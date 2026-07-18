@@ -68,7 +68,7 @@ async function migrate() {
       }
 
       if (paidAmount > 0) {
-        const note = `旧版历史导入:${source.id}`
+        const note = source.id === 'R20260612104352' ? '由旧版累计已收金额迁移' : `旧版历史导入:${source.id}`
         const exists = await client.query('SELECT 1 FROM payment_records WHERE "userId"=$1 AND "rentalId"=$2 AND notes=$3', [userId, rentalId, note])
         if (!exists.rowCount) {
           await client.query('INSERT INTO payment_records ("userId","rentalId","operatorName",amount,"paymentDate","paymentMethod","feeType",notes,"createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)', [userId, rentalId, '旧版数据迁移', paidAmount, dateOnly(record.register_date || source.register_date), '历史导入', '租金', note, timestamp(record.register_date || source.register_date)])
