@@ -7,7 +7,7 @@ import { z } from 'zod'
 import { auth } from '@/lib/auth'
 import { getAccessContext } from '@/lib/access'
 import { db } from '@/lib/db'
-import { buyoutRecords, paymentRecords, renewalRecords, rentalItems, rentals } from '@/lib/db/schema'
+import { accountLedger, buyoutRecords, paymentRecords, receivableBills, renewalRecords, rentalEvents, rentalItems, rentals } from '@/lib/db/schema'
 
 async function getUserId() {
   return (await getAccessContext('租赁操作')).userId
@@ -32,13 +32,16 @@ export async function getRentals(query = '', status = '全部') {
   const rows = await db.select().from(rentals).where(and(...filters)).orderBy(desc(rentals.createdAt))
   if (!rows.length) return []
   const ids = rows.map((row) => row.id)
-  const [items, buyouts, renewals, payments] = await Promise.all([
+  const [items, buyouts, renewals, payments, bills, events, ledger] = await Promise.all([
     db.select().from(rentalItems).where(and(eq(rentalItems.userId, userId), inArray(rentalItems.rentalId, ids))).orderBy(rentalItems.id),
     db.select().from(buyoutRecords).where(and(eq(buyoutRecords.userId, userId), inArray(buyoutRecords.rentalId, ids))).orderBy(desc(buyoutRecords.createdAt)),
     db.select().from(renewalRecords).where(and(eq(renewalRecords.userId, userId), inArray(renewalRecords.rentalId, ids))).orderBy(desc(renewalRecords.createdAt)),
     db.select().from(paymentRecords).where(and(eq(paymentRecords.userId, userId), inArray(paymentRecords.rentalId, ids))).orderBy(desc(paymentRecords.createdAt)),
+    db.select().from(receivableBills).where(and(eq(receivableBills.userId, userId), inArray(receivableBills.rentalId, ids))).orderBy(receivableBills.dueDate),
+    db.select().from(rentalEvents).where(and(eq(rentalEvents.userId, userId), inArray(rentalEvents.rentalId, ids))).orderBy(desc(rentalEvents.createdAt)),
+    db.select().from(accountLedger).where(and(eq(accountLedger.userId, userId), inArray(accountLedger.rentalId, ids))).orderBy(desc(accountLedger.createdAt)),
   ])
-  return rows.map((row) => ({ ...row, items: items.filter((item) => item.rentalId === row.id), buyoutRecords: buyouts.filter((record) => record.rentalId === row.id), renewalRecords: renewals.filter((record) => record.rentalId === row.id), paymentRecords: payments.filter((record) => record.rentalId === row.id) }))
+  return rows.map((row) => ({ ...row, items: items.filter((item) => item.rentalId === row.id), buyoutRecords: buyouts.filter((record) => record.rentalId === row.id), renewalRecords: renewals.filter((record) => record.rentalId === row.id), paymentRecords: payments.filter((record) => record.rentalId === row.id), receivableBills: bills.filter((record) => record.rentalId === row.id), rentalEvents: events.filter((record) => record.rentalId === row.id), accountLedger: ledger.filter((record) => record.rentalId === row.id) }))
 }
 
 export async function getDashboard() {
@@ -58,6 +61,21 @@ export async function createRental(input: RentalInput) {
     const first = value.items[0]
     const [rental] = await tx.insert(rentals).values({ userId, contractNo: value.contractNo, customerName: value.customerName, customerPhone: value.customerPhone, customerAddress: value.customerAddress, startDate: value.startDate, endDate: value.endDate, deposit: String(value.deposit), notes: value.notes, deviceName: value.items.map((item) => item.deviceName).join('、'), deviceType: value.items.length > 1 ? '多设备' : first.deviceType, deviceCode: first.deviceCode, deviceConfig: first.deviceConfig, quantity, monthlyRent: String(monthlyRent), totalRent: String(totalRent), paidAmount: '0', paymentStatus: '待收款', status: '在租' }).returning({ id: rentals.id })
     await tx.insert(rentalItems).values(value.items.map((item) => ({ ...item, userId, rentalId: rental.id, startDate: value.startDate, endDate: value.endDate, monthlyRent: String(item.monthlyRent), totalRent: String(item.totalRent) })))
+    let cursor = value.startDate
+    let billIndex = 1
+    while (cursor <= value.endDate) {
+      const start = new Date(`${cursor}T00:00:00Z`)
+      const end = new Date(start)
+      end.setUTCMonth(end.getUTCMonth() + 1)
+      end.setUTCDate(end.getUTCDate() - 1)
+      const periodEnd = end.toISOString().slice(0, 10) > value.endDate ? value.endDate : end.toISOString().slice(0, 10)
+      await tx.insert(receivableBills).values({ userId, rentalId: rental.id, billNo: `${value.contractNo}-${String(billIndex).padStart(3, '0')}`, periodStart: cursor, periodEnd, dueDate: cursor, billType: '租金', amount: String(monthlyRent), paidAmount: '0', status: '待收' })
+      const next = new Date(start)
+      next.setUTCMonth(next.getUTCMonth() + 1)
+      cursor = next.toISOString().slice(0, 10)
+      billIndex += 1
+    }
+    if (value.deposit > 0) await tx.insert(receivableBills).values({ userId, rentalId: rental.id, billNo: `${value.contractNo}-DEPOSIT`, periodStart: value.startDate, periodEnd: value.startDate, dueDate: value.startDate, billType: '押金', amount: String(value.deposit), paidAmount: '0', status: '待收' })
   })
   revalidatePath('/')
 }
