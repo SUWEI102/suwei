@@ -1,8 +1,9 @@
 import Database from 'better-sqlite3'
 import pg from 'pg'
+import { fileURLToPath } from 'node:url'
 
 const { Pool } = pg
-const SOURCE = new URL('../租赁数据/rental_data.db', import.meta.url).pathname
+const SOURCE = fileURLToPath(new URL('../租赁数据/rental_data.db', import.meta.url))
 const TARGET_EMAIL = process.env.MIGRATION_TARGET_EMAIL || '625730448@qq.com'
 
 if (!process.env.DATABASE_URL) throw new Error('缺少 DATABASE_URL')
@@ -82,8 +83,7 @@ async function migrate() {
 
     const versions = sqlite.prepare('SELECT version_id, record_id, action, data, created_at, note FROM record_versions ORDER BY version_id').all()
     for (const version of versions) {
-      const rentalId = rentalIds.get(version.record_id)
-      if (!rentalId) throw new Error(`历史版本找不到合同: ${version.record_id}`)
+      const rentalId = rentalIds.get(version.record_id) ?? null
       const result = await client.query(`INSERT INTO legacy_record_versions ("userId","rentalId","sourceRecordId","sourceVersionId",action,"snapshotJson","sourceCreatedAt",notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT ("userId","sourceVersionId") DO NOTHING RETURNING id`, [userId, rentalId, version.record_id, version.version_id, version.action, version.data || '{}', timestamp(version.created_at), version.note])
       if (result.rowCount) summary.versionsInserted++; else summary.versionsExisting++
     }
